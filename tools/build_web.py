@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import tempfile
 import urllib.request
 import zipfile
@@ -95,6 +96,21 @@ def publish_libraries(output, release=None):
     print(f"Published library assets from {tag}")
 
 
+def validate_destinations(source, output):
+    for file in (source, *source.rglob("*")):
+        destination = output / file.relative_to(source)
+        if not os.path.lexists(destination):
+            continue
+        if file.is_dir():
+            if not destination.is_dir():
+                raise NotADirectoryError(f"Web release destination is not a directory: {destination}")
+        else:
+            if not destination.is_file():
+                raise OSError(f"Web release destination is not a file: {destination}")
+            if os.name == "nt" and destination.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
+                raise PermissionError(f"Web release destination is read-only: {destination}")
+
+
 def publish_release(output):
     with request("https://api.github.com/repos/boykopovar/AnyPS5/releases/latest") as response:
         release = json.load(response)
@@ -139,6 +155,7 @@ def publish_release(output):
         manifest["revision"] = metadata["revision"]
         (staging / "release.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         (staging / ".nojekyll").touch()
+        validate_destinations(staging, output)
         shutil.copytree(staging, output, dirs_exist_ok=True)
     print(f"Published web converter and libraries from {tag} ({metadata['revision']})")
 

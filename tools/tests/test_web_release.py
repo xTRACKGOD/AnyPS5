@@ -1,6 +1,8 @@
 import hashlib
 import io
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -66,8 +68,8 @@ class WebReleaseTests(unittest.TestCase):
             build_web.publish_release(self.output)
 
     def snapshot(self):
-        return {path.relative_to(self.output).as_posix(): path.read_bytes()
-                for path in self.output.rglob("*") if path.is_file()}
+        return {path.relative_to(self.output).as_posix(): None if path.is_dir() else path.read_bytes()
+                for path in self.output.rglob("*")}
 
     def seed_previous(self):
         for name, content in {"index.html": b"old page", "native/relinker_wasm.wasm": b"newer main wasm",
@@ -86,6 +88,7 @@ class WebReleaseTests(unittest.TestCase):
 
     def test_release_replaces_main_converter_with_matching_frontend_and_libraries(self):
         self.seed_previous()
+        (self.output / "progress.json").write_bytes(b"unrelated progress report")
         self.publish()
         for name, content in self.contents.items():
             self.assertEqual((self.output / name).read_bytes(), content)
@@ -101,6 +104,8 @@ class WebReleaseTests(unittest.TestCase):
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
                 self.assertEqual(archive.read("libs/libkernel.prx"), platform.encode())
         self.assertTrue((self.output / ".nojekyll").is_file())
+        self.assertEqual((self.output / "progress.json").read_bytes(), b"unrelated progress report")
+        self.assertEqual((self.output / "libraries/old.zip").read_bytes(), b"old libraries")
         self.assertEqual(self.requests.count(LATEST), 1)
 
     def test_libraries_flag_also_replaces_an_incompatible_local_converter(self):
@@ -198,6 +203,42 @@ class WebReleaseTests(unittest.TestCase):
 
         with patch.object(build_web, "request", failed_request), self.assertRaisesRegex(OSError, "connection lost"):
             build_web.publish_release(self.output)
+        self.assertEqual(self.snapshot(), previous)
+        self.assertEqual(list(self.build.glob(".web-release-*")), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows read-only output semantics")
+    def test_readonly_wasm_preserves_previous_site(self):
+        self.seed_previous()
+        wasm = self.output / "native/relinker_wasm.wasm"
+        wasm.chmod(stat.S_IREAD)
+        self.addCleanup(wasm.chmod, stat.S_IREAD | stat.S_IWRITE)
+        previous = self.snapshot()
+        with self.assertRaises(OSError):
+            self.publish()
+        self.assertEqual(self.snapshot(), previous)
+        self.assertFalse(wasm.stat().st_mode & stat.S_IWRITE)
+        self.assertEqual(list(self.build.glob(".web-release-*")), [])
+
+    def test_file_in_place_of_native_directory_preserves_previous_site(self):
+        self.seed_previous()
+        native = self.output / "native"
+        (native / "relinker_wasm.wasm").unlink()
+        native.rmdir()
+        native.write_bytes(b"existing native file")
+        previous = self.snapshot()
+        with self.assertRaises(OSError):
+            self.publish()
+        self.assertEqual(self.snapshot(), previous)
+        self.assertEqual(list(self.build.glob(".web-release-*")), [])
+
+    def test_directory_in_place_of_manifest_preserves_previous_site(self):
+        self.seed_previous()
+        manifest = self.output / "release.json"
+        manifest.unlink()
+        manifest.mkdir()
+        previous = self.snapshot()
+        with self.assertRaises(OSError):
+            self.publish()
         self.assertEqual(self.snapshot(), previous)
         self.assertEqual(list(self.build.glob(".web-release-*")), [])
 
