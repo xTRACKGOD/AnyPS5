@@ -605,6 +605,48 @@ class ImportAuditTests(unittest.TestCase):
         records, missing = import_audit.audit(imports, {}, {}, set(), import_audit.ModuleNames({"sdk-shipping.prx"}))
         self.assertEqual((records[0]["class"], missing), ("absent", {"SDK-Shipping.debug_prx": 1}))
 
+    def test_module_suffixes_ignore_case_for_windows_output_only(self):
+        for suffix in (".prx", ".sprx", ".suprx", ".debug_prx"):
+            for extension in (suffix.upper(), suffix.title()):
+                for requested, supplied in (("shipping" + extension, "shipping.prx"),
+                                            ("shipping.prx", "shipping" + extension)):
+                    for windows in (False, True):
+                        with self.subTest(requested=requested, supplied=supplied, windows=windows):
+                            records, missing = import_audit.audit(
+                                [("AAAAAAAAAAA", requested, False)], {}, {}, set(),
+                                import_audit.ModuleNames({supplied}, fold=windows))
+                            expected = ("module", {}) if windows else ("absent", {requested: 1})
+                            self.assertEqual((records[0]["class"], missing), expected)
+
+    def test_suffixless_module_names_keep_platform_case_rules(self):
+        for windows in (False, True):
+            modules = import_audit.ModuleNames({"Shipping"}, fold=windows)
+            self.assertIn("Shipping", modules)
+            self.assertEqual("shipping" in modules, windows)
+            self.assertEqual("shipping.prx" in modules, windows)
+
+    def test_windows_module_suffix_case_is_not_a_cli_failure(self):
+        for requested, supplied in (("shipping.SPRX", "Shipping.prx"),
+                                    ("shipping.prx", "Shipping.DeBuG_PrX")):
+            with self.subTest(requested=requested, supplied=supplied):
+                work = Workspace()
+                self.addCleanup(work.close)
+                (work.libs / "libc.prx").write_bytes(build_pe([]))
+                (work.modules / supplied).write_bytes(exporting("AAAAAAAAAAA"))
+                registry, report = work.root / "game.json", work.root / "audit.json"
+                write_registry(registry, [("AAAAAAAAAAA", requested)])
+                result = subprocess.run(
+                    [sys.executable, str(Path(import_audit.__file__)), str(registry),
+                     "--libs", str(work.libs), "--modules", str(work.modules),
+                     "--source", str(work.source), "--json", str(report)],
+                    capture_output=True, text=True, timeout=20)
+                self.assertEqual((result.returncode, result.stderr), (0, ""), result.stdout)
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(data["unique_by_class"], {"implemented": 0, "stub": 0, "absent": 0, "module": 1})
+                self.assertEqual(data["missing_libraries"], {})
+                self.assertIsNone(data["stops"][0]["nid"])
+                self.assertEqual(data["imports"][0]["library"], requested)
+
     def test_converted_module_matches_imports_of_its_base_name(self):
         work = self.work
         (work.libs / "libc.prx").write_bytes(exporting())
